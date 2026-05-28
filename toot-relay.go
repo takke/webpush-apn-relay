@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/sideshow/apns2"
-	"github.com/sideshow/apns2/certificate"
 	"github.com/sideshow/apns2/payload"
+	"github.com/sideshow/apns2/token"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 
@@ -95,14 +95,24 @@ func main() {
 	flag.IntVar(&maxWorkers, "max-workers", 8, "Maximum number of workers")
 	flag.Parse()
 
-	topic = env("TOPIC", "cx.c3.toot")
-	p12file := env("P12_FILENAME", "toot-relay.p12")
-	p12base64 := env("P12_BASE64", "")
-	p12password := env("P12_PASSWORD", "")
+	// APNs トークン認証 (.p8) 用の設定。
+	// TOPIC は Bundle ID (例: com.zonepane.zero)。デフォルト不要で、未設定なら fatal。
+	// AUTH_KEY_FILE は Apple Developer Portal の Keys から発行した .p8 ファイルのパス。
+	// KEY_ID は同 Key の 10 文字 ID、TEAM_ID は Apple Developer Team ID (10 文字)。
+	topic = env("TOPIC", "")
+	if topic == "" {
+		log.Fatal("TOPIC env var (Bundle ID, e.g. com.zonepane.zero) must be set")
+	}
+	authKeyFile := env("AUTH_KEY_FILE", "AuthKey.p8")
+	keyID := env("KEY_ID", "")
+	teamID := env("TEAM_ID", "")
+	if keyID == "" || teamID == "" {
+		log.Fatal("KEY_ID and TEAM_ID env vars must be set")
+	}
 
 	port := env("PORT", "42069")
-	tlsCrtFile := env("CRT_FILENAME", "toot-relay.crt")
-	tlsKeyFile := env("KEY_FILENAME", "toot-relay.key")
+	tlsCrtFile := env("CRT_FILENAME", "webpush-apn-relay.crt")
+	tlsKeyFile := env("KEY_FILENAME", "webpush-apn-relay.key")
 	// CA_FILENAME can be set to a file that contains PEM encoded certificates that will be
 	// used as the sole root CAs when connecting to the Apple Notification Service API.
 	// If unset, the system-wide certificate store will be used.
@@ -116,28 +126,19 @@ func main() {
 		}
 	}
 
-	if p12base64 != "" {
-		bytes, err := base64.StdEncoding.DecodeString(p12base64)
-		if err != nil {
-			log.Fatal(fmt.Sprintf("Base64 decoding error: %s", err))
-		}
-
-		cert, err := certificate.FromP12Bytes(bytes, p12password)
-		if err != nil {
-			log.Fatal(fmt.Sprintf("Error parsing certificate: %s", err))
-		}
-
-		developmentClient = apns2.NewClient(cert).Development()
-		productionClient = apns2.NewClient(cert).Production()
-	} else {
-		cert, err := certificate.FromP12File(p12file, p12password)
-		if err != nil {
-			log.Fatal(fmt.Sprintf("Error loading certificate file: %s", err))
-		}
-
-		developmentClient = apns2.NewClient(cert).Development()
-		productionClient = apns2.NewClient(cert).Production()
+	// .p8 トークン認証で APNs クライアントを構築 (sandbox/production 両方)。
+	// .p12 証明書認証から切り替え: 年次更新不要、IAM 風の鍵管理が可能。
+	authKey, err := token.AuthKeyFromFile(authKeyFile)
+	if err != nil {
+		log.Fatal(fmt.Sprintf("Error loading auth key file %s: %s", authKeyFile, err))
 	}
+	tk := &token.Token{
+		AuthKey: authKey,
+		KeyID:   keyID,
+		TeamID:  teamID,
+	}
+	developmentClient = apns2.NewTokenClient(tk).Development()
+	productionClient = apns2.NewTokenClient(tk).Production()
 
 	if rootCAs != nil {
 		developmentClient.HTTPClient.Transport.(*http2.Transport).TLSClientConfig.RootCAs = rootCAs
@@ -181,7 +182,11 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 	buffer := new(bytes.Buffer)
 	buffer.ReadFrom(request.Body)
 	encodedString := encode85(buffer.Bytes())
-	payload := payload.NewPayload().Alert("🎺").MutableContent().ContentAvailable().Custom("p", encodedString)
+	// Alert("🎺") は除去。mutable-content: 1 + ContentAvailable で NSE が起動して
+	// alert を実装側で構築するため、relay 側で仮 alert を付けると NSE 失敗/タイムアウト時に
+	// 🎺 のままユーザーに表示されてしまう。NSE 側で必ず alert を構築する設計にすれば
+	// relay 側は alert を付けない方がきれい。
+	payload := payload.NewPayload().MutableContent().ContentAvailable().Custom("p", encodedString)
 
 	if len(components) > 4 {
 		payload.Custom("x", strings.Join(components[4:], "/"))
@@ -209,7 +214,11 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 			requestLog.Error(fmt.Sprintf("Error retrieving salt: %s", err))
 			return
 		}
-	//case "aes128gcm": // No further headers needed. However, not implemented on client side so return 415.
+	case "aes128gcm":
+		// Mastodon 4.4+ の標準。Crypto-Key/Encryption ヘッダは含まれず、
+		// salt と server public key は body 内に内包される (RFC 8188)。
+		// relay 側は body を z85 拡張エンコードして p に詰めるだけで、
+		// NSE 側 (CryptoKit) で復号する。
 	default:
 		writer.WriteHeader(415)
 		fmt.Fprintln(writer, "Unsupported Content-Encoding:", request.Header.Get("Content-Encoding"))
