@@ -188,6 +188,15 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 	// relay 側は alert を付けない方がきれい。
 	payload := payload.NewPayload().MutableContent().ContentAvailable().Custom("p", encodedString)
 
+	// PoC 段階で NSE ターゲット未実装の場合、alert なし payload では端末側で何も
+	// 通知センターに表示されない (didReceiveRemoteNotification も呼ばれない条件下では特に)。
+	// POC_MODE=true なら relay 側で仮 alert を入れて通知センターに表示させる。
+	// フェーズ3 で NSE が動くようになったら POC_MODE=false (or unset) にして
+	// 本実装の payload 形式 (alert なし、NSE で構築) に戻す。
+	if env("POC_MODE", "") == "true" {
+		payload.Alert("PoC Test: APNs payload received")
+	}
+
 	if len(components) > 4 {
 		payload.Custom("x", strings.Join(components[4:], "/"))
 	}
