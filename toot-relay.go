@@ -194,6 +194,10 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 
 	notification.Payload = payload
 	notification.Topic = topic
+	// iOS 13+ では apns-push-type ヘッダが事実上必須。未指定だと APNs が delivery を
+	// 保証しない。Mastodon Web Push は端末で復号して alert 表示する設計なので
+	// "alert" タイプを明示する。本実装でも残す改修。
+	notification.PushType = apns2.PushTypeAlert
 
 	switch request.Header.Get("Content-Encoding") {
 	case "aesgcm":
