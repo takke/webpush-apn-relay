@@ -232,6 +232,10 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 		// salt と server public key は body 内に内包される (RFC 8188)。
 		// relay 側は body を z85 拡張エンコードして p に詰めるだけで、
 		// NSE 側 (CryptoKit) で復号する。
+		// クライアント (NSE) が aes128gcm / aesgcm を判別できるよう rfc="1" を付与する。
+		// rfc 無し = aesgcm (k/s から復号)、rfc="1" = aes128gcm (salt/serverPubKey は body 内包)。
+		// Android FCM relay と整合する設計で、Mastodon 4.4+ の実 push 復号に必須。
+		payload.Custom("rfc", "1")
 	default:
 		writer.WriteHeader(415)
 		fmt.Fprintln(writer, "Unsupported Content-Encoding:", request.Header.Get("Content-Encoding"))
