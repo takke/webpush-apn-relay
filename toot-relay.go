@@ -182,20 +182,17 @@ func handler(writer http.ResponseWriter, request *http.Request) {
 	buffer := new(bytes.Buffer)
 	buffer.ReadFrom(request.Body)
 	encodedString := encode85(buffer.Bytes())
-	// Alert("🎺") は除去。mutable-content: 1 + ContentAvailable で NSE が起動して
-	// alert を実装側で構築するため、relay 側で仮 alert を付けると NSE 失敗/タイムアウト時に
-	// 🎺 のままユーザーに表示されてしまう。NSE 側で必ず alert を構築する設計にすれば
-	// relay 側は alert を付けない方がきれい。
-	payload := payload.NewPayload().MutableContent().ContentAvailable().Custom("p", encodedString)
-
-	// PoC 段階で NSE ターゲット未実装の場合、alert なし payload では端末側で何も
-	// 通知センターに表示されない (didReceiveRemoteNotification も呼ばれない条件下では特に)。
-	// POC_MODE=true なら relay 側で仮 alert を入れて通知センターに表示させる。
-	// フェーズ3 で NSE が動くようになったら POC_MODE=false (or unset) にして
-	// 本実装の payload 形式 (alert なし、NSE で構築) に戻す。
-	if env("POC_MODE", "") == "true" {
-		payload.Alert("PoC Test: APNs payload received")
-	}
+	// プレースホルダ alert を常に含める (重要)。
+	// iOS の NSE (UNNotificationServiceExtension) は「表示される alert を持つ通知」かつ
+	// mutable-content:1 のときだけ起動する。alert が無い (content-available のみの silent push)
+	// と NSE が起動せず、端末で復号できない = 通知が一切表示されない。
+	// 公式 webpush-apn-relay が Alert("🎺") を入れていたのはこの理由。
+	// (Android FCM relay とは逆: FCM は alert があると background/kill で onMessageReceived が
+	//  呼ばれないため alert 削除が正解だが、APNs は alert が無いと NSE が起動しないため必須。)
+	// NSE が復号後に必ず alert を実 Mastodon 通知本文へ差し替えるため、このプレースホルダは
+	// NSE 成功時はユーザーに見えず、NSE 失敗/タイムアウト時のみフォールバックとして表示される。
+	placeholderAlert := env("PLACEHOLDER_ALERT", "New notification")
+	payload := payload.NewPayload().Alert(placeholderAlert).MutableContent().ContentAvailable().Custom("p", encodedString)
 
 	if len(components) > 4 {
 		payload.Custom("x", strings.Join(components[4:], "/"))
